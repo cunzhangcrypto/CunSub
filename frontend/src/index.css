@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #0a0e1a;
+  color: #e2e8f0;
+  font-family: 'Inter', system-ui, sans-serif;
+  min-height: 100vh;
+}
+
+/* 科技感网格背景 */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* 渐变文字 */
+.gradient-text {
+  background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* 流光边框 */
+.flow-border {
+  position: relative;
+  background: linear-gradient(90deg, #131826, #131826) padding-box,
+    linear-gradient(90deg, #00d4ff, #7c3aed, #00d4ff) border-box;
+  background-size: 100% 100%, 200% 100%;
+  border: 1px solid transparent;
+  animation: flow 3s linear infinite;
+}
+
+@keyframes flow {
+  0% { background-position: 0% 50%, 0% 50%; }
+  100% { background-position: 0% 50%, 200% 50%; }
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0e1a;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00d4ff;
+}
+
+/* 发光按钮 */
+.btn-glow {
+  background: linear-gradient(135deg, #00d4ff, #7c3aed);
+  box-shadow: 0 0 12px rgba(0, 212, 255, 0.4);
+  transition: all 0.3s ease;
+}
+.btn-glow:hover {
+  box-shadow: 0 0 24px rgba(0, 212, 255, 0.7);
+  transform: translateY(-1px);
+}
+.btn-glow:disabled {
+  background: #1e293b;
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 终端风格标签 */
+.terminal-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid;
+}
+
+/* 进度条流光 */
+.progress-flow {
+  background: linear-gradient(90deg, #00d4ff, #7c3aed, #00d4ff);
+  background-size: 200% 100%;
+  animation: flow 2s linear infinite;
+}
