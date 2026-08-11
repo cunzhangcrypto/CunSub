@@ -1,6 +1,18 @@
 import re
 
+# 单条字幕最大字符数(不含空格)。超过才触发兜底拆分。
 MAX_CHARS = 18
+
+# 标点停顿: 在这些标点后优先断行(顿号/逗号/句号/分号/冒号/问号/叹号)
+_PUNCT_BREAKS = "，,。；;：:、！!？?"
+
+# 关联词: 在这些词之前断行, 避免长句被硬切成无语义碎块
+_BREAK_BEFORE = ("然后", "接着", "所以", "因为", "但是", "而且", "顺便", "同时",
+                 "比如", "例如", "包括", "另外", "还有", "以及", "总之", "其实",
+                 "甚至", "虽然", "不过", "也就是")
+
+# 语气词/助词: 在这些字之后断行
+_PARTICLE_AFTER = "的呢了啊吧吗呀哦着"
 
 # SRT 时间戳正则: 兼容 HH:MM:SS,mmm 和 MM:SS,mmm 两种格式
 # Gemini 长输出时可能省略小时,例如 01:03,187 --> 01:05,077
@@ -63,12 +75,27 @@ def parse_srt(srt_text: str) -> list[dict]:
 
 
 def clean_punctuation(text: str) -> str:
-    """删除非?!标点"""
+    """删除非?!标点, 但保留数字中的小数点(如 2.5pro、3.14、v1.2)"""
     # 中文标点
     text = re.sub(r'[，。、；：""''（）【】《》…—·]+', '', text)
-    # 英文标点(保留?!)
-    text = re.sub(r'[,.:;\'"()\[\]<>\\/-]+', '', text)
+    # 英文标点(保留?!): 逗号/冒号/分号/引号/括号/尖括号/斜杠/连字符
+    text = re.sub(r'[,:;"()\[\]<>\\/-]+', '', text)
+    # 英文句点: 只删除非小数点的句点(数字之间的点保留)
+    text = re.sub(r'(?<!\d)\.(?!\d)', '', text)
     return text
+
+
+def apply_offset(time_str: str, offset_ms: int) -> str:
+    """给时间戳加偏移(毫秒)。offset_ms 为正=字幕整体推迟, 负=提前。
+    结果不小于 0。"""
+    if not offset_ms:
+        return time_str
+    ms_total = int(round(_time_to_seconds(time_str) * 1000)) + offset_ms
+    ms_total = max(0, ms_total)
+    h, ms_total = divmod(ms_total, 3600000)
+    m, ms_total = divmod(ms_total, 60000)
+    s, ms = divmod(ms_total, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def count_chars(text: str) -> int:
@@ -87,57 +114,78 @@ def apply_terms(text: str, terms_mapping: dict, term_corrections: dict = None) -
     return text
 
 
-def split_by_pauses(text: str, max_chars: int = MAX_CHARS) -> list[str]:
-    """把一条字幕的文本按停顿拆成多段(对齐 test.srt 标准)。
-    1. 双空格(旧版停顿标记)处必断行;
-    2. 单空格是英文词间距,保留;
-    3. 每段超过 max_chars 再智能断句。
+def split_by_pauses(text: str) -> list[str]:
+    """把一条字幕的文本拆成多段, 每段不超过 MAX_CHARS 且语义顺畅。
+    断行优先级: 标点停顿 > 双空格停顿 > 语义安全拆分(不拆英文单词)。
     """
-    parts = re.split(r'  +', text)  # 双空格及以上的停顿处拆开
+    # 1. 标点停顿: 在主要标点后断行(标点留在前一段末尾, 稍后清理)
+    parts = re.split(r'(?<=[%s])' % _PUNCT_BREAKS, text)
     result = []
     for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        if count_chars(part) <= max_chars:
-            result.append(part)
-        else:
-            result.extend(_smart_split(part, max_chars))
+        # 2. 双空格(语义停顿标记)处必断行
+        sub_parts = re.split(r'  +', part)
+        for sp in sub_parts:
+            sp = sp.strip()
+            if not sp:
+                continue
+            # 3. 超过 MAX_CHARS 的段做语义安全拆分
+            if count_chars(sp) <= MAX_CHARS:
+                result.append(sp)
+            else:
+                result.extend(_smart_split(sp))
     return result
 
 
-def _smart_split(text: str, max_chars: int) -> list[str]:
-    """智能断句:把无停顿的超长段切成多段。
-    优先级:英文单词边界 > 语气词后 > 平均分配(避免拆出孤字)。
-    """
+def _smart_split(text: str) -> list[str]:
+    """语义安全拆分: 把超过 MAX_CHARS 的段切短, 保证不拆英文单词。"""
     result = []
-    while count_chars(text) > max_chars:
-        cut = _find_cut(text, max_chars)
-        result.append(text[:cut].strip())
-        text = text[cut:].strip()
+    while count_chars(text) > MAX_CHARS:
+        cut = _find_cut(text)
+        seg = text[:cut].strip()
+        if not seg:  # 防御: 切点无效时按上限硬切, 避免死循环
+            seg = text[:MAX_CHARS]
+            text = text[MAX_CHARS:]
+        else:
+            text = text[cut:].strip()
+        result.append(seg)
     if text:
         result.append(text)
     return result
 
 
-def _find_cut(text: str, max_chars: int) -> int:
-    """在超长段内找最佳切点"""
-    # 1. 英文空格边界
-    window = text[:max_chars + 3]
+def _find_cut(text: str) -> int:
+    """在 MAX_CHARS 附近找最佳切点。
+    优先级: 英文词边界 > 关联词前 > 语气词后 > 兜底(绝不拆英文单词)。
+    """
+    limit = min(MAX_CHARS, len(text))
+    # 1. 英文词边界: 只在空格处切, 且切点前不超过 MAX_CHARS
+    window = text[:MAX_CHARS + 6]
     last_space = window.rfind(" ")
-    if 0 < last_space <= max_chars:
-        return last_space
-    # 2. 语气词/助词后切(呢啊吧吗呀哦的了着)
-    particles = "呢啊吧吗呀哦的着了"
-    for i in range(min(max_chars, len(text)) - 1, 0, -1):
-        if text[i] in particles:
+    while last_space > 0:
+        if count_chars(text[:last_space]) <= MAX_CHARS:
+            return last_space
+        last_space = window.rfind(" ", 0, last_space)
+    # 2. 关联词前: 在前 MAX_CHARS 内找最后一个关联词, 在其前断行
+    head = text[:limit]
+    for w in _BREAK_BEFORE:
+        pos = head.rfind(w)
+        if pos > 0:
+            return pos
+    # 3. 语气词/助词后: 在前 MAX_CHARS 内找最后一个语气词, 在其后断行
+    for i in range(limit - 1, 0, -1):
+        if text[i] in _PARTICLE_AFTER:
             return i + 1
-    # 3. 平均分配兜底:避免切出孤字(如 18+1)
-    tail = count_chars(text) - max_chars
-    if tail < max_chars // 3:
-        # 尾部太短,往前挪,让尾部至少 max_chars//2 字
-        return max(max_chars // 2, count_chars(text) - max_chars // 2)
-    return max_chars
+    # 4. 兜底: 按上限切, 避开英文单词中间
+    cut = MAX_CHARS
+    if " " in text:  # 有词边界可守时回退避开单词中间
+        while cut > 1 and cut < len(text) and text[cut - 1].isalpha() and text[cut].isalpha():
+            cut -= 1
+        if cut < MAX_CHARS // 2:  # 回退过多说明窗口内是连续字母, 直接按上限切
+            cut = MAX_CHARS
+    # 避免切出过短的尾段(孤字)
+    if len(text) - cut < 3 and cut > MAX_CHARS // 2:
+        cut = max(len(text) - 3, 1)
+    return max(cut, 1)
 
 
 def _time_to_seconds(t: str) -> float:
@@ -147,20 +195,18 @@ def _time_to_seconds(t: str) -> float:
 
 
 def _seconds_to_time(sec: float) -> str:
-    ms = int(round((sec - int(sec)) * 1000))
-    if ms >= 1000:
-        sec += 1
-        ms = 0
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = int(sec % 60)
+    """秒转时间戳, 用整数毫秒运算避免浮点进位误差(如 7.9999s+1 进位成 9s)。"""
+    ms_total = int(round(sec * 1000))
+    h, ms_total = divmod(ms_total, 3600000)
+    m, ms_total = divmod(ms_total, 60000)
+    s, ms = divmod(ms_total, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: dict = None) -> list[dict]:
-    """后处理：标点清理 + 术语替换 + 按双空格断行。
-    每条字幕按双空格(停顿标记)拆分成独立字幕行,超过 18 字的段智能断句,
-    时间戳按字符比例分配给各段。
+    """后处理: 标点清理 + 术语替换 + 按双空格停顿断行。
+    不做字数硬拆——保持 Gemini 语义断句与单词完整,
+    时间戳按字符比例分配给按停顿拆出的各段。
     """
     if terms_mapping is None:
         terms_mapping = {}
@@ -171,7 +217,7 @@ def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: di
 
     for sub in raw_subs:
         text = sub["text"]
-        text = clean_punctuation(text)
+        # 先做术语替换, 再按标点/停顿拆分, 最后清理标点
         text = apply_terms(text, terms_mapping, term_corrections)
         text = text.strip()
 
@@ -179,6 +225,10 @@ def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: di
             continue
 
         segments = split_by_pauses(text)
+        segments = [clean_punctuation(s).strip() for s in segments]
+        segments = [s for s in segments if s]
+        if not segments:
+            continue
         if len(segments) == 1:
             processed.append({
                 "idx": idx,
@@ -194,10 +244,13 @@ def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: di
             end_sec = _time_to_seconds(sub["end_time"])
             duration = end_sec - start_sec
             cursor = start_sec
-            for seg in segments:
-                seg_chars = count_chars(seg)
-                seg_dur = duration * seg_chars / total_chars if total_chars else duration / len(segments)
-                seg_end = cursor + seg_dur
+            for i, seg in enumerate(segments):
+                if i == len(segments) - 1:
+                    seg_end = end_sec  # 最后一段精确对齐原结束时间
+                else:
+                    seg_chars = count_chars(seg)
+                    seg_dur = duration * seg_chars / total_chars if total_chars else duration / len(segments)
+                    seg_end = cursor + seg_dur
                 processed.append({
                     "idx": idx,
                     "start_time": _seconds_to_time(cursor),

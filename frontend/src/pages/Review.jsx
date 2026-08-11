@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { getSubtitles, editSubtitle, exportSubtitles } from '../api/client'
+import { getSubtitles, editSubtitle, exportSubtitles, setSubtitleOffset } from '../api/client'
 
 export default function Review({ projectId, setView }) {
   const [subtitles, setSubtitles] = useState([])
@@ -8,6 +8,8 @@ export default function Review({ projectId, setView }) {
   const [editText, setEditText] = useState('')
   const [exporting, setExporting] = useState('')
   const [exportError, setExportError] = useState('')
+  const [offsetMs, setOffsetMs] = useState(0)
+  const [offsetSaving, setOffsetSaving] = useState(false)
 
   useEffect(() => {
     load()
@@ -16,9 +18,25 @@ export default function Review({ projectId, setView }) {
   async function load() {
     try {
       const data = await getSubtitles(projectId)
-      setSubtitles(data)
+      setSubtitles(data.subtitles || [])
+      setOffsetMs(data.offset_ms || 0)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function adjustOffset(delta) {
+    const next = Math.max(-2000, Math.min(2000, offsetMs + delta))
+    setOffsetSaving(true)
+    try {
+      await setSubtitleOffset(projectId, next)
+      setOffsetMs(next)
+      const data = await getSubtitles(projectId)
+      setSubtitles(data.subtitles || [])
+    } catch (e) {
+      setExportError(e.message || '设置偏移失败')
+    } finally {
+      setOffsetSaving(false)
     }
   }
 
@@ -88,6 +106,37 @@ export default function Review({ projectId, setView }) {
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="flex items-center gap-3 mb-4 px-4 py-3 bg-bg-card border border-bg-border rounded-xl">
+        <span className="text-sm text-tx-primary font-medium">字幕同步偏移</span>
+        <button
+          onClick={() => adjustOffset(-100)}
+          disabled={offsetSaving}
+          className="px-3 py-1.5 rounded-lg border border-bg-border text-sm font-mono hover:border-accent-cyan hover:text-accent-cyan transition-colors disabled:opacity-40"
+        >
+          -100ms
+        </button>
+        <span className="text-sm text-accent-cyan font-mono w-16 text-center">
+          {offsetMs > 0 ? `+${offsetMs}` : offsetMs}ms
+        </span>
+        <button
+          onClick={() => adjustOffset(100)}
+          disabled={offsetSaving}
+          className="px-3 py-1.5 rounded-lg border border-bg-border text-sm font-mono hover:border-accent-cyan hover:text-accent-cyan transition-colors disabled:opacity-40"
+        >
+          +100ms
+        </button>
+        <button
+          onClick={() => adjustOffset(-offsetMs)}
+          disabled={offsetSaving}
+          className="px-3 py-1.5 rounded-lg border border-bg-border text-sm font-mono hover:border-accent-red hover:text-accent-red transition-colors disabled:opacity-40"
+        >
+          重置
+        </button>
+        <span className="text-xs text-tx-dim font-mono">
+          // 字幕偏早就调大(推迟)，偏晚就调小
+        </span>
       </div>
 
       {exportError && (

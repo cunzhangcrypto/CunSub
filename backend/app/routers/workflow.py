@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from app.database import get_db
 from app.models import ConfirmRequest, SubtitleEdit
 from app.services.gemini_service import understand, generate
-from app.services.subtitle_service import post_process
+from app.services.subtitle_service import post_process, apply_offset
 from app.services.audio_service import get_audio_clip
 from app.services.progress_service import set_progress, simulate_progress
 
@@ -205,8 +205,30 @@ def start_generation(project_id: str):
 def get_subtitles(project_id: str):
     db = get_db()
     rows = db.execute("SELECT * FROM subtitles WHERE project_id = ? ORDER BY idx", (project_id,)).fetchall()
+    project = db.execute("SELECT offset_ms FROM projects WHERE id = ?", (project_id,)).fetchone()
+    offset_ms = (project["offset_ms"] if project else 0) or 0
     db.close()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["start_time"] = apply_offset(d["start_time"], offset_ms)
+        d["end_time"] = apply_offset(d["end_time"], offset_ms)
+        result.append(d)
+    return {"offset_ms": offset_ms, "subtitles": result}
+
+
+@router.post("/{project_id}/offset")
+def set_offset(project_id: str, offset_ms: int = 0):
+    """调整字幕整体偏移(毫秒)。正=推迟(字幕偏早时用), 负=提前。"""
+    db = get_db()
+    project = db.execute("SELECT id FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        db.close()
+        raise HTTPException(404, "项目不存在")
+    db.execute("UPDATE projects SET offset_ms = ? WHERE id = ?", (offset_ms, project_id))
+    db.commit()
+    db.close()
+    return {"ok": True, "offset_ms": offset_ms}
 
 
 @router.put("/{project_id}/subtitles/{idx}")

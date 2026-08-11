@@ -117,6 +117,12 @@ export async function getSubtitles(id) {
   return res.json()
 }
 
+export async function setSubtitleOffset(id, offsetMs) {
+  const res = await fetch(`${BASE}/workflow/${id}/offset?offset_ms=${offsetMs}`, { method: 'POST' })
+  if (!res.ok) throw new Error('设置偏移失败')
+  return res.json()
+}
+
 export async function editSubtitle(id, idx, text) {
   const res = await fetch(`${BASE}/workflow/${id}/subtitles/${idx}`, {
     method: 'PUT',

@@ -22,6 +22,7 @@ def init_db():
         audio_path TEXT,
         gemini_file_uri TEXT,
         gemini_file_name TEXT,
+        offset_ms INTEGER DEFAULT 200,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
@@ -87,6 +88,13 @@ def init_db():
     # 迁移：为旧数据库的 confirmations 表补 term_corrections 列
     try:
         conn.execute("ALTER TABLE confirmations ADD COLUMN term_corrections TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+
+    # 迁移：为旧数据库的 projects 表补 offset_ms 列(字幕整体偏移,默认200ms补偿Gemini时间戳偏早)
+    try:
+        conn.execute("ALTER TABLE projects ADD COLUMN offset_ms INTEGER DEFAULT 200")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # 列已存在

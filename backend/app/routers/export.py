@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from app.database import get_db
 from app.config import EXPORT_DIR
+from app.services.subtitle_service import apply_offset
 
 router = APIRouter()
 
@@ -20,6 +21,14 @@ def export(project_id: str, format: str = "srt"):
 
     if not rows:
         raise HTTPException(400, "没有字幕可导出")
+
+    # 应用字幕整体偏移(用户可在审校页调整)
+    offset_ms = (project["offset_ms"] if project else 0) or 0
+    if offset_ms:
+        rows = [dict(r) for r in rows]
+        for r in rows:
+            r["start_time"] = apply_offset(r["start_time"], offset_ms)
+            r["end_time"] = apply_offset(r["end_time"], offset_ms)
 
     if format == "srt":
         content = _to_srt(rows)
