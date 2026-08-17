@@ -22,6 +22,32 @@ _TIME_RE = re.compile(
     r'(\d{1,2}:\d{2}:\d{2}[.,]\d{1,3}|\d{1,2}:\d{2}[.,]\d{1,3})'
 )
 
+# Gemini 偶发把时间戳输出成空格分隔格式: 00 00 02 029 --> 00 00 04 399
+# (时 分 秒 毫秒 各为一组, 用空格分隔, 原 _TIME_RE 匹配不到会被当成字幕文本)
+_SPACE_TIME_RE = re.compile(
+    r'(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,3})\s*-->\s*'
+    r'(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,3})'
+)
+
+# 时间戳垃圾行: 由 数字/空格/冒号/点/逗号/箭头/连字符/括号 组成的行(如 "00 00 02 029 --> 00 00 04 399")
+_TIMESTAMP_JUNK_RE = re.compile(r'^[\d\s:.,，;；\-—>→()（）\[\]]+$')
+
+
+def _normalize_timestamps(srt_text: str) -> str:
+    """把 Gemini 输出的空格分隔时间戳(00 00 02 029 --> 00 00 04 399)
+    规范化为标准格式(00:00:02,029 --> 00:00:04,399),
+    使其能被 _TIME_RE 识别为真正的时间边界, 避免被当成字幕文本。
+    """
+
+    def _fmt(m):
+        h, mi, s = (int(m.group(i)) for i in range(1, 4))
+        h2, mi2, s2 = (int(m.group(i)) for i in range(5, 8))
+        return (f"{h:02d}:{mi:02d}:{s:02d},{m.group(4).zfill(3)}"
+                f" --> "
+                f"{h2:02d}:{mi2:02d}:{s2:02d},{m.group(8).zfill(3)}")
+
+    return _SPACE_TIME_RE.sub(_fmt, srt_text)
+
 
 def _normalize_time(t: str) -> str:
     """标准化时间戳为 HH:MM:SS,mmm 格式。
@@ -43,12 +69,16 @@ def _normalize_time(t: str) -> str:
 def parse_srt(srt_text: str) -> list[dict]:
     """健壮解析 SRT 文本为字幕列表。
     用正则匹配时间戳行,不依赖固定的空行分隔,避免 Gemini 输出格式波动丢数据。
+    兼容 Gemini 偶发的空格分隔时间戳,并过滤时间戳垃圾行。
     """
     srt_text = srt_text.strip()
     # 去除可能的 markdown 包裹
     if srt_text.startswith("```"):
         srt_text = re.sub(r'^```[a-z]*\n', '', srt_text)
         srt_text = re.sub(r'\n```$', '', srt_text)
+
+    # 空格分隔时间戳(00 00 02 029 --> 00 00 04 399)规范化为标准格式
+    srt_text = _normalize_timestamps(srt_text)
 
     # 找出所有时间戳行的位置
     matches = list(_TIME_RE.finditer(srt_text))
@@ -60,10 +90,12 @@ def parse_srt(srt_text: str) -> list[dict]:
         text_start = m.end()
         text_end = matches[i + 1].start() if i + 1 < len(matches) else len(srt_text)
         raw_text = srt_text[text_start:text_end]
-        # 去掉首尾空行、序号行、空行
+        # 去掉首尾空行、序号行、空行、时间戳垃圾行
         lines = [ln.strip() for ln in raw_text.split('\n') if ln.strip()]
-        # 过滤掉纯数字行(下一块的序号)和空行
-        text_lines = [ln for ln in lines if not ln.isdigit()]
+        text_lines = [
+            ln for ln in lines
+            if not ln.isdigit() and not _TIMESTAMP_JUNK_RE.match(ln)
+        ]
         text = ' '.join(text_lines).strip()
         if text:
             subtitles.append({
@@ -96,6 +128,21 @@ def apply_offset(time_str: str, offset_ms: int) -> str:
     m, ms_total = divmod(ms_total, 60000)
     s, ms = divmod(ms_total, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+_converter = None
+
+
+def to_simplified(text: str) -> str:
+    """繁体转简体(基于 opencc t2s)。失败时原样返回, 不影响主流程。"""
+    global _converter
+    try:
+        if _converter is None:
+            from opencc import OpenCC
+            _converter = OpenCC("t2s")
+        return _converter.convert(text)
+    except Exception:
+        return text
 
 
 def count_chars(text: str) -> int:
@@ -217,7 +264,8 @@ def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: di
 
     for sub in raw_subs:
         text = sub["text"]
-        # 先做术语替换, 再按标点/停顿拆分, 最后清理标点
+        # 先转简体, 再做术语替换, 然后按标点/停顿拆分, 最后清理标点
+        text = to_simplified(text)
         text = apply_terms(text, terms_mapping, term_corrections)
         text = text.strip()
 
