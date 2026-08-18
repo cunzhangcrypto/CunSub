@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from app.database import get_db
 from app.config import EXPORT_DIR
-from app.services.subtitle_service import apply_offset
+from app.services.subtitle_service import apply_offset, make_monotonic
 
 router = APIRouter()
 
@@ -29,6 +29,9 @@ def export(project_id: str, format: str = "srt"):
         for r in rows:
             r["start_time"] = apply_offset(r["start_time"], offset_ms)
             r["end_time"] = apply_offset(r["end_time"], offset_ms)
+
+    # 时间单调化: 修正 Gemini 偶发的相邻时间重叠, 避免剪映叠加显示成多排
+    rows = make_monotonic([dict(r) for r in rows])
 
     if format == "srt":
         content = _to_srt(rows)

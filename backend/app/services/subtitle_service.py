@@ -250,6 +250,24 @@ def _seconds_to_time(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def make_monotonic(subtitles: list[dict]) -> list[dict]:
+    """修正字幕时间重叠: 保证下一条的起始时间不早于上一条的结束时间。
+    原因: Gemini 偶发输出相邻时间戳重叠(甚至乱序), 剪映会把重叠字幕叠加显示成多排。
+    保持字幕顺序与文本不变, 只顺延时间; 时长不足 0.5s 的字幕补足到 0.5s。"""
+    last_end = 0.0
+    for sub in subtitles:
+        start = _time_to_seconds(sub["start_time"])
+        end = _time_to_seconds(sub["end_time"])
+        if start < last_end:
+            start = last_end
+        if end <= start:
+            end = start + 0.5
+        sub["start_time"] = _seconds_to_time(start)
+        sub["end_time"] = _seconds_to_time(end)
+        last_end = end
+    return subtitles
+
+
 def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: dict = None) -> list[dict]:
     """后处理: 标点清理 + 术语替换 + 按双空格停顿断行。
     不做字数硬拆——保持 Gemini 语义断句与单词完整,
@@ -308,4 +326,4 @@ def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: di
                 idx += 1
                 cursor = seg_end
 
-    return processed
+    return make_monotonic(processed)
