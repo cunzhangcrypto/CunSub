@@ -73,7 +73,7 @@ def _detect_proxy() -> str:
 
     # 0. 先测直连 —— TUN 模式的 VPN(如小地球仪)直连即可
     try:
-        with httpx.Client(timeout=5) as c:
+        with httpx.Client(timeout=3) as c:
             c.get("https://generativelanguage.googleapis.com")
         return ""  # 直连可用,不需要代理
     except Exception:
@@ -115,7 +115,7 @@ def check_gemini_reachable() -> tuple[bool, str]:
     """检测 Gemini API 是否可达,返回 (是否可达, 提示信息)"""
     import httpx
     try:
-        kwargs = {"timeout": 8}
+        kwargs = {"timeout": 4}
         if GEMINI_PROXY:
             kwargs["proxy"] = GEMINI_PROXY
         with httpx.Client(**kwargs) as c:

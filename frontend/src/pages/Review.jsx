@@ -1,5 +1,13 @@
-import { useState, useEffect } from 'react'
-import { getSubtitles, editSubtitle, exportSubtitles, setSubtitleOffset } from '../api/client'
+import { useState, useEffect, useRef } from 'react'
+import { getSubtitles, editSubtitle, exportSubtitles, setSubtitleOffset, startGeneration } from '../api/client'
+
+function fmtElapsed(sec) {
+  if (sec == null) return '0s'
+  if (sec < 60) return `${sec.toFixed(1)}s`
+  const m = Math.floor(sec / 60)
+  const s = Math.round(sec % 60)
+  return `${m}m${s}s`
+}
 
 export default function Review({ projectId, setView }) {
   const [subtitles, setSubtitles] = useState([])
@@ -10,9 +18,16 @@ export default function Review({ projectId, setView }) {
   const [exportError, setExportError] = useState('')
   const [offsetMs, setOffsetMs] = useState(0)
   const [offsetSaving, setOffsetSaving] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
+  const [regenElapsed, setRegenElapsed] = useState(0)
+  const [regenMsg, setRegenMsg] = useState('')
+  const regenTimerRef = useRef(null)
 
   useEffect(() => {
     load()
+    return () => {
+      if (regenTimerRef.current) clearInterval(regenTimerRef.current)
+    }
   }, [])
 
   async function load() {
@@ -63,6 +78,32 @@ export default function Review({ projectId, setView }) {
     }
   }
 
+  async function handleRegenerate() {
+    setRegenerating(true)
+    setRegenMsg('')
+    const start = Date.now()
+    setRegenElapsed(0)
+    regenTimerRef.current = setInterval(() => setRegenElapsed((Date.now() - start) / 1000), 100)
+    try {
+      const res = await startGeneration(projectId)
+      // 重新拉取(含偏移后的)字幕
+      const data = await getSubtitles(projectId)
+      setSubtitles(data.subtitles || [])
+      setOffsetMs(data.offset_ms || 0)
+      setRegenMsg(
+        res.continued
+          ? `重新生成完成, 共 ${res.count} 条 (自动续传 ${res.rounds - 1} 次补齐尾部)`
+          : `重新生成完成, 共 ${res.count} 条`
+      )
+    } catch (e) {
+      setRegenMsg('重新生成失败: ' + (e.message || '未知错误'))
+    } finally {
+      clearInterval(regenTimerRef.current)
+      regenTimerRef.current = null
+      setRegenerating(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center py-32">
@@ -94,8 +135,15 @@ export default function Review({ projectId, setView }) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={handleRegenerate}
+            disabled={regenerating}
+            className="px-4 py-2 rounded-lg bg-accent-purple/20 border border-accent-purple/50 text-sm font-mono text-white hover:bg-accent-purple/35 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {regenerating ? `⏱ 重新生成中 ${fmtElapsed(regenElapsed)}` : '🔄 重新生成字幕'}
+          </button>
           <span className="text-xs text-tx-secondary font-mono mr-1">导出:</span>
-          {['srt', 'vtt', 'ass'].map(fmt => (
+          {['srt', 'vtt', 'ass', 'txt'].map(fmt => (
             <button
               key={fmt}
               onClick={() => handleExport(fmt)}
@@ -107,6 +155,18 @@ export default function Review({ projectId, setView }) {
           ))}
         </div>
       </div>
+
+      {regenMsg && (
+        <div
+          className={`rounded-lg px-4 py-3 text-sm mb-4 ${
+            regenMsg.startsWith('重新生成失败')
+              ? 'bg-accent-red/10 border border-accent-red/30 text-accent-red'
+              : 'bg-accent-green/10 border border-accent-green/30 text-accent-green'
+          }`}
+        >
+          {regenMsg}
+        </div>
+      )}
 
       <div className="flex items-center gap-3 mb-4 px-4 py-3 bg-bg-card border border-bg-border rounded-xl">
         <span className="text-sm text-tx-primary font-medium">字幕同步偏移</span>
@@ -137,6 +197,12 @@ export default function Review({ projectId, setView }) {
         <span className="text-xs text-tx-dim font-mono">
           // 字幕偏早就调大(推迟)，偏晚就调小
         </span>
+        <button
+          onClick={() => setView({ page: 'cover', projectId })}
+          className="px-3 py-1.5 rounded-lg border border-accent-cyan/40 text-sm font-mono text-accent-cyan hover:bg-accent-cyan/10 transition-colors ml-auto"
+        >
+          🖼️ 封面提示词
+        </button>
       </div>
 
       {exportError && (

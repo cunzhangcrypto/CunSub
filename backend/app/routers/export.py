@@ -39,6 +39,8 @@ def export(project_id: str, format: str = "srt"):
         content = _to_vtt(rows)
     elif format == "ass":
         content = _to_ass(rows)
+    elif format == "txt":
+        content = _to_txt(rows)
     else:
         raise HTTPException(400, "不支持的格式")
 
@@ -62,6 +64,12 @@ def export(project_id: str, format: str = "srt"):
     db.close()
 
     return FileResponse(file_path, filename=file_name, media_type="application/octet-stream")
+
+
+def _to_txt(rows) -> str:
+    """纯文本稿: 每行一条字幕文本, 无时间轴。"""
+    lines = [r["text"] for r in rows]
+    return "\n".join(lines) + f"\n\n{WATERMARK}\n"
 
 
 def _to_srt(rows) -> str:

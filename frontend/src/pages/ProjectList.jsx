@@ -16,15 +16,21 @@ const STATUS_MAP = {
 export default function ProjectList({ setView }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     load()
   }, [])
 
   async function load() {
+    setLoading(true)
+    setError('')
     try {
       const data = await listProjects()
       setProjects(data)
+    } catch (err) {
+      setError(err.message || '加载项目列表失败，请确认后端服务是否运行')
+      setProjects([])
     } finally {
       setLoading(false)
     }
@@ -43,7 +49,6 @@ export default function ProjectList({ setView }) {
 
   function handleClick(project) {
     const status = project.status
-    // 这些状态还需要走确认流程:进入确认页(等待确认 或 确认后重新生成)
     if (['uploaded', 'understanding', 'awaiting_confirmation', 'confirmed', 'extracted', 'uploading_gemini', 'extracting', 'uploading'].includes(status)) {
       setView({ page: 'confirmation', projectId: project.id })
     } else {
@@ -64,13 +69,31 @@ export default function ProjectList({ setView }) {
           <h2 className="text-2xl font-bold mb-1">项目列表</h2>
           <p className="text-sm text-tx-secondary font-mono">// 选择项目继续，或新建字幕任务</p>
         </div>
-        <button
-          onClick={() => setView({ page: 'upload' })}
-          className="btn-glow px-6 py-2.5 rounded-lg font-medium text-bg-base"
-        >
-          + 新建项目
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={load}
+            disabled={loading}
+            className="px-4 py-2.5 rounded-lg border border-bg-border text-tx-secondary font-mono text-sm hover:border-accent-cyan hover:text-accent-cyan transition-colors disabled:opacity-40"
+          >
+            ↻ {loading ? '加载中...' : '刷新'}
+          </button>
+          <button
+            onClick={() => setView({ page: 'upload' })}
+            className="btn-glow px-6 py-2.5 rounded-lg font-medium text-bg-base"
+          >
+            + 新建项目
+          </button>
+        </div>
       </div>
+
+      {error && (
+        <div className="mb-6 bg-accent-red/10 border border-accent-red/30 rounded-lg px-4 py-3 text-sm text-accent-red flex items-center justify-between">
+          <span>⚠ {error}</span>
+          <button onClick={load} className="underline hover:no-underline text-accent-red/80 ml-4 shrink-0">
+            重试
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <div className="text-center py-20 text-tx-secondary font-mono">loading...</div>
@@ -88,7 +111,7 @@ export default function ProjectList({ setView }) {
       ) : (
         <div className="grid gap-3">
           {projects.map(p => {
-            const st = STATUS_MAP[p.status] || STATUS_MAP.uploaded
+            const st = STATUS_MAP[p.status] || { label: p.status, color: 'text-tx-secondary border-tx-secondary/30' }
             return (
               <div
                 key={p.id}

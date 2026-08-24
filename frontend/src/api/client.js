@@ -123,6 +123,49 @@ export async function setSubtitleOffset(id, offsetMs) {
   return res.json()
 }
 
+export async function analyzeCover(id) {
+  const res = await fetch(`${BASE}/cover/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: id })
+  })
+  if (!res.ok) {
+    let msg = '分析失败'
+    try {
+      const err = await res.json()
+      msg = err.detail || msg
+    } catch {}
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
+export async function getCoverFields(id) {
+  const res = await fetch(`${BASE}/cover/${id}/fields`)
+  return res.json()
+}
+
+export async function buildCoverPrompt(id, fields) {
+  const res = await fetch(`${BASE}/cover/${id}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: fields.title,
+      cover_text: fields.cover_text,
+      category: fields.category
+    })
+  })
+  if (!res.ok) {
+    let msg = '生成提示词失败'
+    try {
+      const err = await res.json()
+      msg = err.detail || msg
+    } catch {}
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
 export async function editSubtitle(id, idx, text) {
   const res = await fetch(`${BASE}/workflow/${id}/subtitles/${idx}`, {
     method: 'PUT',

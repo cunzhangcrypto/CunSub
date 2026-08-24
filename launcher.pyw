@@ -62,9 +62,16 @@ class Launcher(tk.Tk):
         self.fe_proc = None
         self.be_tail = 0
         self.fe_tail = 0
+        self.be_restarts = 0
+        self.fe_restarts = 0
+        self._started = False  # start_services 是否已被调用
+        self._browser_opened = False  # 浏览器是否已打开(仅在 _tick 中开一次)
 
         self._fonts()
         self._build()
+        # 初始状态:显示"正在启动..."(黄灯), 避免 start_services(1200ms) 前出现"未运行"(红灯)
+        self._set_card(self._card_be, None)
+        self._set_card(self._card_fe, None)
         self.after(800, self._tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         # 打开后自动启动服务(无需手动点按钮)
@@ -171,42 +178,61 @@ class Launcher(tk.Tk):
 
     # ---------------- 服务控制 ----------------
     def start_services(self):
-        if self.be_proc and self.be_proc.poll() is None:
-            self._log_line("SYSTEM", "服务已在运行")
+        """启动缺失的服务(后端/前端各自独立判断)。
+        旧逻辑: 任一服务已在运行就整段跳过, 导致"后端在跑、前端没跑"时
+        点启动永远无法把前端拉起。现在只补齐缺失的那一个。
+        """
+        be_up = port_open(5278) or (self.be_proc and self.be_proc.poll() is None)
+        fe_up = port_open(5277) or (self.fe_proc and self.fe_proc.poll() is None)
+        if be_up and fe_up:
+            self._started = True
+            self._log_line("SYSTEM", "前后端服务均已在运行")
+            self.open_browser()
             return
-        # 端口被外部进程占用(服务已由其他方式启动), 不重复启动
-        be_up = port_open(5278)
-        fe_up = port_open(5277)
-        if be_up or fe_up:
-            self._log_line("SYSTEM", f"检测到服务已在运行(后端={be_up} 前端={fe_up}), 无需重复启动")
-            self.after(500, self.open_browser)
-            return
-        for f in (LOG_BE, LOG_BE_ERR, LOG_FE, LOG_FE_ERR):
-            try:
-                f.unlink()
-            except OSError:
-                pass
-        env = dict(os.environ, NO_COLOR="1")
-        be_out = open(LOG_BE, "wb", buffering=0)
-        be_err = open(LOG_BE_ERR, "wb", buffering=0)
-        fe_out = open(LOG_FE, "wb", buffering=0)
-        fe_err = open(LOG_FE_ERR, "wb", buffering=0)
+        if not be_up:
+            self._spawn_backend()
+        if not fe_up:
+            self._spawn_frontend()
+        self._started = True
+        self._log_line("SYSTEM", f"服务状态: 后端={'运行中' if be_up else '已启动'} 前端={'运行中' if fe_up else '已启动'}")
+
+    def _spawn_backend(self):
         try:
+            for f in (LOG_BE, LOG_BE_ERR):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            be_out = open(LOG_BE, "wb", buffering=0)
+            be_err = open(LOG_BE_ERR, "wb", buffering=0)
             self.be_proc = subprocess.Popen(
                 [sys.executable, "run.py"], cwd=str(BACKEND),
-                stdout=be_out, stderr=be_err, env=env,
+                stdout=be_out, stderr=be_err, env=dict(os.environ, NO_COLOR="1"),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            self.be_restarts = 0
+            self._log_line("SYSTEM", "后端已启动 (5278)")
+        except Exception as e:
+            self._log_line("ERR", f"后端启动失败: {e}")
+
+    def _spawn_frontend(self):
+        try:
+            for f in (LOG_FE, LOG_FE_ERR):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            fe_out = open(LOG_FE, "wb", buffering=0)
+            fe_err = open(LOG_FE_ERR, "wb", buffering=0)
             self.fe_proc = subprocess.Popen(
                 ["cmd", "/c", "npm run dev"], cwd=str(FRONTEND),
-                stdout=fe_out, stderr=fe_err, env=env,
+                stdout=fe_out, stderr=fe_err, env=dict(os.environ, NO_COLOR="1"),
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            self.fe_restarts = 0
+            self._log_line("SYSTEM", "前端已启动 (5277)")
         except Exception as e:
-            self._log_line("ERR", f"启动失败: {e}")
-            return
-        self._log_line("SYSTEM", "服务已启动: backend(5278) + frontend(5277)")
-        self.after(2000, self.open_browser)
+            self._log_line("ERR", f"前端启动失败: {e}")
 
     def stop_services(self):
         for name, proc in (("backend", self.be_proc), ("frontend", self.fe_proc)):
@@ -218,18 +244,46 @@ class Launcher(tk.Tk):
 
     def open_browser(self):
         if port_open(5277) and port_open(5278):
-            webbrowser.open("http://localhost:5277")
-            self._log_line("SYSTEM", "已打开浏览器: http://localhost:5277")
+            try:
+                import webbrowser
+                webbrowser.open("http://localhost:5277")
+                self._log_line("SYSTEM", "已打开浏览器: http://localhost:5277")
+            except Exception as e:
+                self._log_line("ERR", f"打开浏览器失败: {e}")
         else:
+            self._log_line("SYSTEM", "服务未就绪，等待重试...")
             self.after(2000, self.open_browser)
 
     # ---------------- 轮询 ----------------
     def _tick(self):
         be_ok = port_open(5278)
         fe_ok = port_open(5277)
+        # 自动重启: 已托管的进程意外退出且端口不在监听时补拉起来(最多 3 次, 防死循环)
+        if not be_ok and self.be_proc and self.be_proc.poll() is not None:
+            if self.be_restarts < 3:
+                self.be_restarts += 1
+                self._log_line("ERR", f"后端已退出, 自动重启 ({self.be_restarts}/3)...")
+                self._spawn_backend()
+        if not fe_ok and self.fe_proc and self.fe_proc.poll() is not None:
+            if self.fe_restarts < 3:
+                self.fe_restarts += 1
+                self._log_line("ERR", f"前端已退出, 自动重启 ({self.fe_restarts}/3)...")
+                self._spawn_frontend()
+
         self._set_card(self._card_be, be_ok)
         self._set_card(self._card_fe, fe_ok)
         self._set_start_btn(be_ok and fe_ok)
+
+        # 前后端都就绪后自动打开浏览器(仅一次)
+        if be_ok and fe_ok and not self._browser_opened:
+            self._browser_opened = True
+            self._log_line("SYSTEM", "正在打开浏览器...")
+            try:
+                import webbrowser
+                webbrowser.open("http://localhost:5277")
+                self._log_line("SYSTEM", "已打开浏览器: http://localhost:5277")
+            except Exception as e:
+                self._log_line("ERR", f"打开浏览器失败: {e}")
 
         for tag, path, attr in (("backend", LOG_BE, "be_tail"), ("frontend", LOG_FE, "fe_tail")):
             pos, new = self._tail(path, getattr(self, attr))
@@ -250,8 +304,16 @@ class Launcher(tk.Tk):
                                    activebackground="#0891b2", activeforeground="white")
 
     def _set_card(self, card, ok):
-        card["dot"].itemconfig(1, fill=GREEN if ok else RED)
-        card["lbl"].config(text="运行中" if ok else "未运行", fg=GREEN if ok else DIM)
+        if ok is None:
+            card["dot"].itemconfig(1, fill=YELLOW)
+            card["lbl"].config(text="正在启动...", fg=YELLOW)
+        elif ok:
+            card["dot"].itemconfig(1, fill=GREEN)
+            card["lbl"].config(text="运行中", fg=GREEN)
+        else:
+            card["dot"].itemconfig(1, fill=RED)
+            label = "未运行" if self._started else "正在启动..."
+            card["lbl"].config(text=label, fg=RED if self._started else YELLOW)
 
     def _on_close(self):
         if (self.be_proc and self.be_proc.poll() is None) or (self.fe_proc and self.fe_proc.poll() is None):

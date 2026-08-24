@@ -10,6 +10,7 @@ function fmtElapsed(sec) {
 }
 
 const STEPS = [
+  { key: 'checking', label: '检查连通性', hint: '检测 Gemini API 是否可达' },
   { key: 'uploading', label: '上传文件', hint: '接收文件并落盘' },
   { key: 'extracting', label: '提取音频', hint: 'MP3 直接复制,视频才转码' },
   { key: 'uploading_gemini', label: '上传 Gemini', hint: '上传到 Google File API' },

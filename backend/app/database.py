@@ -67,6 +67,13 @@ def init_db():
         FOREIGN KEY (project_id) REFERENCES projects(id)
     );
 
+    CREATE TABLE IF NOT EXISTS cover_prompts (
+        project_id TEXT PRIMARY KEY,
+        content TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+    );
+
     CREATE TABLE IF NOT EXISTS term_library (
         term TEXT PRIMARY KEY,
         aliases TEXT,

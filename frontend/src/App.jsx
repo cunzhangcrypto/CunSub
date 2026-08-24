@@ -3,6 +3,7 @@ import ProjectList from './pages/ProjectList'
 import Upload from './pages/Upload'
 import Confirmation from './pages/Confirmation'
 import Review from './pages/Review'
+import Cover from './pages/Cover'
 import { getBranding } from './api/client'
 
 // 与后端 config.BRANDING_SECRET 对应(开源项目里公开,属"增加难度"而非绝对防护)
@@ -129,6 +130,8 @@ export default function App() {
         return <Confirmation projectId={view.projectId} setView={setView} />
       case 'review':
         return <Review projectId={view.projectId} setView={setView} />
+      case 'cover':
+        return <Cover projectId={view.projectId} setView={setView} />
       default:
         return <ProjectList setView={setView} />
     }

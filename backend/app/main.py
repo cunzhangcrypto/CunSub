@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import projects, workflow, export
+from app.routers import projects, workflow, export, cover
 from app.database import init_db
 from app.config import check_gemini_reachable, GEMINI_PROXY, BRANDING, BRANDING_SECRET
 
@@ -16,6 +16,7 @@ app.add_middleware(
 app.include_router(projects.router, prefix="/projects", tags=["projects"])
 app.include_router(workflow.router, prefix="/workflow", tags=["workflow"])
 app.include_router(export.router, prefix="/export", tags=["export"])
+app.include_router(cover.router, prefix="/cover", tags=["cover"])
 
 
 @app.get("/")

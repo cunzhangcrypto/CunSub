@@ -3,7 +3,7 @@ import time
 from google import genai
 from google.genai import types
 from app.config import GEMINI_API_KEY, GEMINI_MODEL
-from app.prompts import PROMPT_UNDERSTANDING, PROMPT_GENERATION
+from app.prompts import PROMPT_UNDERSTANDING, PROMPT_GENERATION, PROMPT_GENERATION_CONTINUE
 
 _client = None
 
@@ -64,22 +64,31 @@ def understand(file_name: str) -> dict:
     raise last_err
 
 
-def generate(file_name: str, terms_mapping: dict, term_corrections: dict = None, additional_terms: list = None) -> str:
+def _fill_generation_prompt(template: str, terms_mapping: dict, term_corrections: dict, additional_terms: list) -> str:
+    """填充字幕生成提示词的公共占位符。"""
+    return (template
+            .replace("{TERMS_MAPPING}", json.dumps(terms_mapping, ensure_ascii=False, indent=2))
+            .replace("{TERM_CORRECTIONS}", json.dumps(term_corrections or {}, ensure_ascii=False, indent=2))
+            .replace("{ADDITIONAL_TERMS}", json.dumps(additional_terms or [], ensure_ascii=False, indent=2)))
+
+
+def generate(file_name: str, terms_mapping: dict, term_corrections: dict = None,
+             additional_terms: list = None, continue_from: str = None) -> str:
     """阶段2：基于音频+确认术语生成 SRT 字幕。
     带重试机制:Gemini API 偶发 Server disconnected,自动重试最多 3 次。
+    continue_from: 断点续传时的绝对时间戳(如 "00:08:18,000"),
+    非空时改用续传提示词,只转录该时间点之后的音频内容。
     """
     c = get_client()
     f = c.files.get(name=file_name)
-    prompt = PROMPT_GENERATION.replace(
-        "{TERMS_MAPPING}",
-        json.dumps(terms_mapping, ensure_ascii=False, indent=2)
-    ).replace(
-        "{TERM_CORRECTIONS}",
-        json.dumps(term_corrections or {}, ensure_ascii=False, indent=2)
-    ).replace(
-        "{ADDITIONAL_TERMS}",
-        json.dumps(additional_terms or [], ensure_ascii=False, indent=2)
-    )
+    if continue_from:
+        prompt = _fill_generation_prompt(
+            PROMPT_GENERATION_CONTINUE, terms_mapping, term_corrections, additional_terms
+        ).replace("{LAST_END}", continue_from)
+    else:
+        prompt = _fill_generation_prompt(
+            PROMPT_GENERATION, terms_mapping, term_corrections, additional_terms
+        )
 
     last_err = None
     for attempt in range(1, 4):

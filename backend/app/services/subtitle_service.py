@@ -250,6 +250,21 @@ def _seconds_to_time(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def last_covered_seconds(subtitles: list[dict]) -> float:
+    """所有字幕覆盖到的最晚时间(秒)。用于判断生成是否被截断(尾部缺失)。"""
+    return max((_time_to_seconds(s["end_time"]) for s in subtitles), default=0.0)
+
+
+def finalize_subtitles(subtitles: list[dict]) -> list[dict]:
+    """多轮(首轮+续传轮)字幕合并后的统一处理:
+    按起始时间排序 -> 重排 idx -> 时间单调化(消除续传衔接处的时间重叠)。
+    """
+    ordered = sorted(subtitles, key=lambda s: _time_to_seconds(s["start_time"]))
+    for i, s in enumerate(ordered, 1):
+        s["idx"] = i
+    return make_monotonic(ordered)
+
+
 def make_monotonic(subtitles: list[dict]) -> list[dict]:
     """修正字幕时间重叠: 保证下一条的起始时间不早于上一条的结束时间。
     原因: Gemini 偶发输出相邻时间戳重叠(甚至乱序), 剪映会把重叠字幕叠加显示成多排。
