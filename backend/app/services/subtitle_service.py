@@ -1,15 +1,24 @@
 import re
 
-# 单条字幕最大字符数(不含空格)。超过才触发兜底拆分。
+# 单条字幕舒适目标长度(不含空格)。超过 TARGET_LEN 就尽量按语义边界拆短,
+# 因为一行 18 字一口气读不完, 中文每行 11~12 字左右才适合阅读。
+TARGET_LEN = 12
+
+# 单条字幕绝对硬上限(不含空格)。超过它必切(兜底拆分), 但优先找语义边界。
 MAX_CHARS = 18
 
 # 标点停顿: 在这些标点后优先断行(顿号/逗号/句号/分号/冒号/问号/叹号)
 _PUNCT_BREAKS = "，,。；;：:、！!？?"
 
-# 关联词: 在这些词之前断行, 避免长句被硬切成无语义碎块
+# 关联词/话题词: 在这些词之前断行, 避免长句被硬切成无语义碎块。
+# 除关联词外, 还包含「这次/这个/下面/我们/他们」这类常开新话题与小句的词,
+# 例如 "它会让我们选择这次可乐宣传片要什么画幅" 应在 "这次" 前拆成自然两句。
 _BREAK_BEFORE = ("然后", "接着", "所以", "因为", "但是", "而且", "顺便", "同时",
                  "比如", "例如", "包括", "另外", "还有", "以及", "总之", "其实",
-                 "甚至", "虽然", "不过", "也就是")
+                 "甚至", "虽然", "不过", "也就是",
+                 "这次", "下次", "这个", "那个", "下面", "接下来",
+                 "我们", "他们", "她们", "你们",
+                 "关于", "对于", "通过", "针对", "借助", "围绕")
 
 # 语气词/助词: 在这些字之后断行
 _PARTICLE_AFTER = "的呢了啊吧吗呀哦着"
@@ -183,56 +192,136 @@ def split_by_pauses(text: str) -> list[str]:
     return result
 
 
+def _is_semantic(text: str, i: int) -> bool:
+    """切点 i 是否落在『语义边界』上(逗号早已剥掉, 此处针对长句中剩余的可断点)。
+    语义边界 = 空格 / 语气助词后 / 关联话题词前。"""
+    if i < 1 or i >= len(text):
+        return False
+    if text[i] == " ":
+        return True
+    if text[i - 1] in _PARTICLE_AFTER:
+        return True
+    for w in _BREAK_BEFORE:
+        if text.startswith(w, i):
+            return True
+    return False
+
+
 def _smart_split(text: str) -> list[str]:
-    """语义安全拆分: 把超过 MAX_CHARS 的段切短, 保证不拆英文单词。"""
+    """把一段字幕文本拆成多行。
+
+    两阶段:
+      阶段A(必切): 超过硬上限 MAX_CHARS 时必须切平——_find_cut 会优先语义边界、
+                    绝不劈英文单词、避开悬空残尾。
+      阶段B(按需): 超过舒适目标 TARGET_LEN(12) 但仍在上限内 → 尽量切到 ~12。
+                    切点仍由 _find_cut 给出(优先语义边界), 但只有两段都 ≥6 字
+                    才真的拆开, 避免出现 "么画幅" 这类过短的悬空残句。
+    """
+    text = text.strip()
     result = []
+    # 阶段A: 超硬上限必切
     while count_chars(text) > MAX_CHARS:
         cut = _find_cut(text)
         seg = text[:cut].strip()
         if not seg:  # 防御: 切点无效时按上限硬切, 避免死循环
             seg = text[:MAX_CHARS]
-            text = text[MAX_CHARS:]
+            text = text[MAX_CHARS:].strip()
         else:
             text = text[cut:].strip()
         result.append(seg)
+    # 阶段B: (舒适, 上限] 之间 → 尽量切短, 但两段须都 ≥6 字才拆
+    while count_chars(text) > TARGET_LEN:
+        cut = _find_cut(text)
+        head = text[:cut].strip()
+        tail = text[cut:].strip()
+        if count_chars(head) >= 6 and count_chars(tail) >= 6:
+            result.append(head)
+            text = tail
+            continue
+        break
     if text:
         result.append(text)
     return result
 
 
 def _find_cut(text: str) -> int:
-    """在 MAX_CHARS 附近找最佳切点。
-    优先级: 英文词边界 > 关联词前 > 语气词后 > 兜底(绝不拆英文单词)。
+    """在句子中找最佳切点(首行尽量 ≤ TARGET_LEN, 绝不劈开英文/拉丁单词)。
+
+    两级选择:
+      一级(语义边界): 在『首行 ≤ TARGET_LEN+3』的窗口内找语义边界
+                       (代词/关联词前、语气助词后、空格), 取最接近 TARGET_LEN 的。
+                       首行因语义边界被拖得太长就放弃, 避免 18 字长行。
+      二级(均衡切):   没有合格语义边界时, 取最接近 TARGET_LEN 的均衡位置,
+                       同时避开悬空残尾。绝不落在英文单词中间。
     """
-    limit = min(MAX_CHARS, len(text))
-    # 1. 英文词边界: 只在空格处切, 且切点前不超过 MAX_CHARS
-    window = text[:MAX_CHARS + 6]
-    last_space = window.rfind(" ")
-    while last_space > 0:
-        if count_chars(text[:last_space]) <= MAX_CHARS:
-            return last_space
-        last_space = window.rfind(" ", 0, last_space)
-    # 2. 关联词前: 在前 MAX_CHARS 内找最后一个关联词, 在其前断行
-    head = text[:limit]
-    for w in _BREAK_BEFORE:
-        pos = head.rfind(w)
-        if pos > 0:
-            return pos
-    # 3. 语气词/助词后: 在前 MAX_CHARS 内找最后一个语气词, 在其后断行
-    for i in range(limit - 1, 0, -1):
-        if text[i] in _PARTICLE_AFTER:
-            return i + 1
-    # 4. 兜底: 按上限切, 避开英文单词中间
-    cut = MAX_CHARS
-    if " " in text:  # 有词边界可守时回退避开单词中间
-        while cut > 1 and cut < len(text) and text[cut - 1].isalpha() and text[cut].isalpha():
-            cut -= 1
-        if cut < MAX_CHARS // 2:  # 回退过多说明窗口内是连续字母, 直接按上限切
-            cut = MAX_CHARS
-    # 避免切出过短的尾段(孤字)
-    if len(text) - cut < 3 and cut > MAX_CHARS // 2:
-        cut = max(len(text) - 3, 1)
-    return max(cut, 1)
+    n = len(text)
+    if n <= 1:
+        return n
+    limit = min(MAX_CHARS, n - 1)  # 始终给尾巴留 ≥1 字, 保证是真拆分
+    target = min(TARGET_LEN, limit)
+
+    def is_latin(c: str) -> bool:
+        return bool(c) and c.isascii() and c.isalnum()
+
+    def latin_split(i: int) -> bool:
+        return i < n and is_latin(text[i - 1]) and is_latin(text[i])
+
+    # 一级: 语义边界
+    sem_best = None
+    sem_d = 1e9
+    for i in range(3, min(limit, target + 3) + 1):
+        if latin_split(i):
+            continue
+        if n - i < 4:  # 残尾不放做语义切点
+            continue
+        if _is_semantic(text, i):
+            d = abs(i - target)
+            if d < sem_d:
+                sem_d = d
+                sem_best = i
+    if sem_best is not None:
+        return sem_best
+
+    # 二级: 均衡切 — 优先『紧贴英文/拉丁单词边界』的切点(不撕裂中英文交界),
+    #       否则取最接近 target 的均衡位置; 残尾越小越差。
+    def latin_edge(i: int) -> bool:
+        return i < n and is_latin(text[i - 1]) != is_latin(text[i])
+
+    # 二级a: 目标附近的拉丁单词边界(离 target ≤ 4)
+    edge_best = None
+    edge_key = (1e9, 1e9)
+    for i in range(3, limit + 1):
+        if latin_split(i):
+            continue
+        if abs(i - target) > 4:
+            continue
+        if not latin_edge(i):
+            continue
+        tail = n - i
+        pen = 0 if tail >= 4 else (4 - tail)
+        key = (abs(i - target), pen)
+        if key < edge_key:
+            edge_key = key
+            edge_best = i
+    if edge_best is not None:
+        return edge_best
+
+    # 二级b: 普通均衡切
+    bal_best = None
+    bal_key = (1e9, 1e9)
+    for i in range(3, limit + 1):
+        if latin_split(i):
+            continue
+        tail = n - i
+        pen = 0 if tail >= 4 else (4 - tail)
+        key = (abs(i - target), pen)
+        if key < bal_key:
+            bal_key = key
+            bal_best = i
+    if bal_best is not None:
+        return bal_best
+    # 极端兜底: 前 limit 字是同一段超长拉丁连续词, 无安全切点
+    return min(limit, max(3, n - 1))
 
 
 def _time_to_seconds(t: str) -> float:
