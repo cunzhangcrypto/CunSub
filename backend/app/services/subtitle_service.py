@@ -23,6 +23,20 @@ _BREAK_BEFORE = ("然后", "接着", "所以", "因为", "但是", "而且", "�
 # 语气词/助词: 在这些字之后断行
 _PARTICLE_AFTER = "的呢了啊吧吗呀哦着"
 
+# 常见双字词: 均衡切时若恰好从这些词中间劈开(如 电|脑 劈坏 "电脑"),
+# 就自动把切点挪到词边界, 避免出现 "脑设备的一个指纹" 这种不通顺的残句。
+_COMMON_WORDS = frozenset(
+    "电脑 手机 设备 项目 内容 功能 工具 用户 模型 数据 训练 架构 视频 音频 字幕 "
+    "方法 结果 时间 工作 帮助 需要 使用 可以 因为 所以 但是 如果 而且 然后 通过 "
+    "关于 对于 针对 我们 你们 他们 她们 这个 那个 一个 一些 这里 那里 现在 刚才 "
+    "已经 正在 将要 非常 特别 真的 完全 直接 简单 复杂 错误 正确 问题 情况 东西 "
+    "任何 有些 其他 等等 上面 下面 前面 后面 里面 外面 左边 右边 "
+    "朋友 同事 大家 一起 开始 结束 完成 继续 出现 发生 发现 知道 觉得 认为 希望 "
+    "应该 必须 可能 也许 或者 以及 还有 除了 之前 之后 上面 下面 里面 外面 左边 "
+    "右边 后面 前面 屏幕 窗口 按钮 点击 打开 关闭 保存 删除 添加 更新 修改 整理 "
+    "版本 支持 提供 使用 语言 中文 英文 生成 制作 处理 转换 导出 导入 上传 下载 ".split()
+)
+
 # SRT 时间戳正则: 兼容 HH:MM:SS,mmm 和 MM:SS,mmm 两种格式
 # Gemini 长输出时可能省略小时,例如 01:03,187 --> 01:05,077
 _TIME_RE = re.compile(
@@ -244,6 +258,39 @@ def _smart_split(text: str) -> list[str]:
     return result
 
 
+def _is_latin(c: str) -> bool:
+    """是否 ASCII 字母/数字(是英文/拉丁单词的一部分)。"""
+    return bool(c) and c.isascii() and c.isalnum()
+
+
+def _avoid_common_split(text: str, i: int) -> int:
+    """均衡切若恰好落在某个常见双字词中间, 挪到最近的词边界。
+
+    例如 20 字的 "我们在右上角这里有一个电脑设备的一个指纹" 均衡切在第 12 字,
+    会把 "电脑" 劈成 电|脑 得 "脑设备的一个指纹"; 这里自动挪到:
+      "我们在右上角这里有一个 | 电脑设备的一个指纹"。"""
+    n = len(text)
+    if not (1 <= i < n) or text[i - 1:i + 1] not in _COMMON_WORDS:
+        return i
+    target = min(TARGET_LEN, min(MAX_CHARS, n - 1))
+    best_alt = None
+    best_d = 1e9
+    for j in (i - 1, i + 1, i - 2, i + 2, i - 3, i + 3):
+        if not (3 <= j <= min(MAX_CHARS, n - 1)):
+            continue
+        if _is_latin(text[j - 1]) and _is_latin(text[j]):  # 英文单词中间
+            continue
+        if text[j - 1:j + 1] in _COMMON_WORDS:  # 挪过去又劈另一个词
+            continue
+        if n - j < 4:  # 残尾
+            continue
+        d = abs(j - target)
+        if d < best_d:
+            best_d = d
+            best_alt = j
+    return best_alt if best_alt is not None else i
+
+
 def _find_cut(text: str) -> int:
     """在句子中找最佳切点(首行尽量 ≤ TARGET_LEN, 绝不劈开英文/拉丁单词)。
 
@@ -304,7 +351,7 @@ def _find_cut(text: str) -> int:
             edge_key = key
             edge_best = i
     if edge_best is not None:
-        return edge_best
+        return _avoid_common_split(text, edge_best)
 
     # 二级b: 普通均衡切
     bal_best = None
@@ -319,7 +366,7 @@ def _find_cut(text: str) -> int:
             bal_key = key
             bal_best = i
     if bal_best is not None:
-        return bal_best
+        return _avoid_common_split(text, bal_best)
     # 极端兜底: 前 limit 字是同一段超长拉丁连续词, 无安全切点
     return min(limit, max(3, n - 1))
 
