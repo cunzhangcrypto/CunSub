@@ -18,6 +18,10 @@ backend/data/
 *.mov
 *.mkv
 
+# whisper 本地模型(约3GB, 不入库; 在本地 backend/models 直接使用)
+backend/models/
+models/
+
 # 临时测试文件
 test.mp3
 test_watermark.py

@@ -8,7 +8,7 @@ from app.models import ConfirmRequest, SubtitleEdit
 from app.services.gemini_service import understand, generate
 from app.services.subtitle_service import (
     post_process, apply_offset, finalize_subtitles, last_covered_seconds,
-    _time_to_seconds, _seconds_to_time,
+    _time_to_seconds, _seconds_to_time, transcribe_audio, reanchor_to_audio,
 )
 from app.services.audio_service import get_audio_clip
 from app.services.progress_service import set_progress, simulate_progress
@@ -287,6 +287,14 @@ def start_generation(project_id: str):
         rounds += 1
 
     subtitles = finalize_subtitles(all_subs)
+
+    # 用本地 whisper 对语音做真实对齐, 覆盖 Gemini 的不可靠时间戳:
+    # 文字仍是 Gemini 的, 时间轴对齐到真实语音。失败则保留 Gemini 时间。
+    audio_path = project.get("audio_path")
+    if audio_path:
+        segs = transcribe_audio(audio_path)
+        if segs:
+            subtitles = reanchor_to_audio(subtitles, segs)
 
     now = datetime.now().isoformat()
     db = get_db()

@@ -18,6 +18,13 @@ for d in [DATA_DIR, AUDIO_DIR, EXPORT_DIR]:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-pro"
 
+# ---- 字幕时间轴对齐(faster-whisper) ----
+# Gemini 对长音频的每句时间戳不可靠, 用本地 faster-whisper 转录得到真实对齐语音的
+# 语音块边界, 再把 Gemini 的文字映射到这些边界上。
+# 模型已随项目携带(HF 缓存目录结构): backend/models/models--Systran--faster-whisper-medium
+WHISPER_MODEL_DIR = BASE_DIR / "models"
+WHISPER_MODEL = "Systran/faster-whisper-medium"
+
 # ---- 版权信息(方案B:后端下发) ----
 # 品牌信息统一由后端下发,前端渲染,防止他人仅改前端代码就抹掉版权
 BRANDING = {

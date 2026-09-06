@@ -1,3 +1,4 @@
+import os
 import re
 
 # SRT 时间戳正则: 兼容 HH:MM:SS,mmm 和 MM:SS,mmm 两种格式
@@ -215,3 +216,132 @@ def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: di
             "text": text
         })
     return make_monotonic(processed)
+
+
+# ===========================================================================
+# 字幕时间轴真实对齐(faster-whisper)
+# Gemini 对长音频逐句时间戳不可靠, 会导致字幕和语音脱节。这里用本机
+# faster-whisper 转录得到真实对齐音频的「语音块」边界, 再把 Gemini 的文字
+# 按字符占比映射到这些边界上 —— 文字是 Gemini 的, 时间轴是 whisper 的。
+# ===========================================================================
+
+_whisper_model = None
+_whisper_device = None   # "cuda" 或 "cpu", 用于 GPU 失败时回退判断
+
+
+def _build_whisper(device: str):
+    import os
+    import ctranslate2 as ct
+    from faster_whisper import WhisperModel
+    from app.config import WHISPER_MODEL, WHISPER_MODEL_DIR
+    # 强制走本地缓存, 禁止访问 HuggingFace Hub
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    supported = set(ct.get_supported_compute_types(device))
+    compute = next(
+        (t for t in ("float16", "bfloat16", "int8_float32", "int8", "float32")
+         if t in supported), "int8",
+    )
+    return WhisperModel(
+        WHISPER_MODEL, device=device, compute_type=compute,
+        download_root=str(WHISPER_MODEL_DIR), local_files_only=True,
+    )
+
+
+def get_whisper_model():
+    """惰性加载 faster-whisper 模型(全局复用一个)。优先 GPU, 只从本地模型目录加载。"""
+    global _whisper_model, _whisper_device
+    if _whisper_model is None:
+        import ctranslate2 as ct
+        # 用 ctranslate2 检测 GPU(torch 可能是 CPU 版, 不能用来判断)
+        _whisper_device = "cuda" if ct.get_cuda_device_count() > 0 else "cpu"
+        try:
+            _whisper_model = _build_whisper(_whisper_device)
+        except Exception:
+            _whisper_model, _whisper_device = None, None
+            raise
+    return _whisper_model
+
+
+def transcribe_audio(audio_path: str) -> list[tuple[float, float, str]]:
+    """对音频做一次语音识别, 返回真实对齐的语音块 [(start, end, text), ...](秒)。
+    优先 GPU; 若 GPU 运行时缺失(如缺 cublas DLL)自动回退到 CPU。仍失败返回空列表,
+    由调用方回退到 Gemini 时间戳。"""
+    global _whisper_model, _whisper_device
+    try:
+        model = get_whisper_model()
+        segments, _ = model.transcribe(
+            audio_path, language="zh", vad_filter=True, beam_size=1,
+        )
+        return [(s.start, s.end, s.text) for s in segments]
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        # GPU 运行时缺失(常见: cublas64_12.dll 等) → 回退到 CPU 重建再试一次
+        if _whisper_device == "cuda":
+            try:
+                _whisper_model = _build_whisper("cpu")
+                _whisper_device = "cpu"
+                segments, _ = _whisper_model.transcribe(
+                    audio_path, language="zh", vad_filter=True, beam_size=1,
+                )
+                return [(s.start, s.end, s.text) for s in segments]
+            except Exception:
+                traceback.print_exc()
+                return []
+        return []
+
+
+def reanchor_to_audio(gemini_subs: list[dict], segs: list[tuple[float, float, str]]) -> list[dict]:
+    """把 Gemini 的字幕文字映射到 whisper 的真实语音时间轴上。
+
+    思路: 把 whisper 的语音块(去掉静音)按累积时长连成一条「语音轴」, 再按
+    Gemini 各条文字的字数占比, 把文字分配进这条轴上, 最后转换回绝对时间。
+    效果: 文字顺序与 Gemini 一致, 但每句出现的时间点由真实语音决定(不落在
+    静音里), 实现「Gemini 文字 + whisper 时间」的对齐。
+
+    若 segs 为空(whisper 失败/无语音), 原样返回以回退到 Gemini 时间戳。
+    """
+    if not segs:
+        return gemini_subs
+
+    blocks = [(s, e) for s, e, _ in segs if e > s and e > 0]
+    if not blocks:
+        return gemini_subs
+    total_speech = sum(e - s for s, e in blocks)
+    if total_speech <= 0:
+        return gemini_subs
+
+    import bisect
+    cum_start = []  # cum_start[i] = 第 i 块之前累计语音秒数
+    acc = 0.0
+    for s, e in blocks:
+        cum_start.append(acc)
+        acc += e - s
+
+    def to_abs(P: float) -> float:
+        i = bisect.bisect_right(cum_start, P) - 1
+        if i < 0:
+            i = 0
+        if i >= len(blocks):
+            i = len(blocks) - 1
+        s, e = blocks[i]
+        dur = e - s
+        return s + max(0.0, min(dur, P - cum_start[i]))
+
+    chars = [len(g.get("text", "").replace(" ", "")) for g in gemini_subs]
+    total = sum(chars)
+    if total <= 0:
+        return gemini_subs
+
+    result = []
+    pos = 0.0
+    for g, c in zip(gemini_subs, chars):
+        start = to_abs(pos)
+        pos += (c / total) * total_speech
+        end = to_abs(pos)
+        g = dict(g)
+        g["start_time"] = _seconds_to_time(start)
+        g["end_time"] = _seconds_to_time(max(start + 0.05, end))
+        result.append(g)
+    return make_monotonic(result)

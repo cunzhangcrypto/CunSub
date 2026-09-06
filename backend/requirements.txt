@@ -6,3 +6,4 @@ pydub
 httpx
 socksio
 opencc-python-reimplemented
+faster-whisper
