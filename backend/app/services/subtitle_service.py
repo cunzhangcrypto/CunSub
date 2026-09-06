@@ -1,42 +1,5 @@
 import re
 
-# 单条字幕舒适目标长度(不含空格)。超过 TARGET_LEN 就尽量按语义边界拆短,
-# 因为一行 18 字一口气读不完, 中文每行 11~12 字左右才适合阅读。
-TARGET_LEN = 12
-
-# 单条字幕绝对硬上限(不含空格)。超过它必切(兜底拆分), 但优先找语义边界。
-MAX_CHARS = 18
-
-# 标点停顿: 在这些标点后优先断行(顿号/逗号/句号/分号/冒号/问号/叹号)
-_PUNCT_BREAKS = "，,。；;：:、！!？?"
-
-# 关联词/话题词: 在这些词之前断行, 避免长句被硬切成无语义碎块。
-# 除关联词外, 还包含「这次/这个/下面/我们/他们」这类常开新话题与小句的词,
-# 例如 "它会让我们选择这次可乐宣传片要什么画幅" 应在 "这次" 前拆成自然两句。
-_BREAK_BEFORE = ("然后", "接着", "所以", "因为", "但是", "而且", "顺便", "同时",
-                 "比如", "例如", "包括", "另外", "还有", "以及", "总之", "其实",
-                 "甚至", "虽然", "不过", "也就是",
-                 "这次", "下次", "这个", "那个", "下面", "接下来",
-                 "我们", "他们", "她们", "你们",
-                 "关于", "对于", "通过", "针对", "借助", "围绕")
-
-# 语气词/助词: 在这些字之后断行
-_PARTICLE_AFTER = "的呢了啊吧吗呀哦着"
-
-# 常见双字词: 均衡切时若恰好从这些词中间劈开(如 电|脑 劈坏 "电脑"),
-# 就自动把切点挪到词边界, 避免出现 "脑设备的一个指纹" 这种不通顺的残句。
-_COMMON_WORDS = frozenset(
-    "电脑 手机 设备 项目 内容 功能 工具 用户 模型 数据 训练 架构 视频 音频 字幕 "
-    "方法 结果 时间 工作 帮助 需要 使用 可以 因为 所以 但是 如果 而且 然后 通过 "
-    "关于 对于 针对 我们 你们 他们 她们 这个 那个 一个 一些 这里 那里 现在 刚才 "
-    "已经 正在 将要 非常 特别 真的 完全 直接 简单 复杂 错误 正确 问题 情况 东西 "
-    "任何 有些 其他 等等 上面 下面 前面 后面 里面 外面 左边 右边 "
-    "朋友 同事 大家 一起 开始 结束 完成 继续 出现 发生 发现 知道 觉得 认为 希望 "
-    "应该 必须 可能 也许 或者 以及 还有 除了 之前 之后 上面 下面 里面 外面 左边 "
-    "右边 后面 前面 屏幕 窗口 按钮 点击 打开 关闭 保存 删除 添加 更新 修改 整理 "
-    "版本 支持 提供 使用 语言 中文 英文 生成 制作 处理 转换 导出 导入 上传 下载 ".split()
-)
-
 # SRT 时间戳正则: 兼容 HH:MM:SS,mmm 和 MM:SS,mmm 两种格式
 # Gemini 长输出时可能省略小时,例如 01:03,187 --> 01:05,077
 _TIME_RE = re.compile(
@@ -168,11 +131,6 @@ def to_simplified(text: str) -> str:
         return text
 
 
-def count_chars(text: str) -> int:
-    """统计字符数(不含空格)"""
-    return len(text.replace(" ", ""))
-
-
 def apply_terms(text: str, terms_mapping: dict, term_corrections: dict = None) -> str:
     """术语词典替换校验"""
     for original, correct in terms_mapping.items():
@@ -182,193 +140,6 @@ def apply_terms(text: str, terms_mapping: dict, term_corrections: dict = None) -
         if original and correct and original != correct:
             text = text.replace(original, correct)
     return text
-
-
-def split_by_pauses(text: str) -> list[str]:
-    """把一条字幕的文本拆成多段, 每段不超过 MAX_CHARS 且语义顺畅。
-    断行优先级: 标点停顿 > 双空格停顿 > 语义安全拆分(不拆英文单词)。
-    """
-    # 1. 标点停顿: 在主要标点后断行(标点留在前一段末尾, 稍后清理)
-    parts = re.split(r'(?<=[%s])' % _PUNCT_BREAKS, text)
-    result = []
-    for part in parts:
-        # 2. 双空格(语义停顿标记)处必断行
-        sub_parts = re.split(r'  +', part)
-        for sp in sub_parts:
-            sp = sp.strip()
-            if not sp:
-                continue
-            # 3. 超过 MAX_CHARS 的段做语义安全拆分
-            if count_chars(sp) <= MAX_CHARS:
-                result.append(sp)
-            else:
-                result.extend(_smart_split(sp))
-    return result
-
-
-def _is_semantic(text: str, i: int) -> bool:
-    """切点 i 是否落在『语义边界』上(逗号早已剥掉, 此处针对长句中剩余的可断点)。
-    语义边界 = 空格 / 语气助词后 / 关联话题词前。"""
-    if i < 1 or i >= len(text):
-        return False
-    if text[i] == " ":
-        return True
-    if text[i - 1] in _PARTICLE_AFTER:
-        return True
-    for w in _BREAK_BEFORE:
-        if text.startswith(w, i):
-            return True
-    return False
-
-
-def _smart_split(text: str) -> list[str]:
-    """把一段字幕文本拆成多行。
-
-    两阶段:
-      阶段A(必切): 超过硬上限 MAX_CHARS 时必须切平——_find_cut 会优先语义边界、
-                    绝不劈英文单词、避开悬空残尾。
-      阶段B(按需): 超过舒适目标 TARGET_LEN(12) 但仍在上限内 → 尽量切到 ~12。
-                    切点仍由 _find_cut 给出(优先语义边界), 但只有两段都 ≥6 字
-                    才真的拆开, 避免出现 "么画幅" 这类过短的悬空残句。
-    """
-    text = text.strip()
-    result = []
-    # 阶段A: 超硬上限必切
-    while count_chars(text) > MAX_CHARS:
-        cut = _find_cut(text)
-        seg = text[:cut].strip()
-        if not seg:  # 防御: 切点无效时按上限硬切, 避免死循环
-            seg = text[:MAX_CHARS]
-            text = text[MAX_CHARS:].strip()
-        else:
-            text = text[cut:].strip()
-        result.append(seg)
-    # 阶段B: (舒适, 上限] 之间 → 尽量切短, 但两段须都 ≥6 字才拆
-    while count_chars(text) > TARGET_LEN:
-        cut = _find_cut(text)
-        head = text[:cut].strip()
-        tail = text[cut:].strip()
-        if count_chars(head) >= 6 and count_chars(tail) >= 6:
-            result.append(head)
-            text = tail
-            continue
-        break
-    if text:
-        result.append(text)
-    return result
-
-
-def _is_latin(c: str) -> bool:
-    """是否 ASCII 字母/数字(是英文/拉丁单词的一部分)。"""
-    return bool(c) and c.isascii() and c.isalnum()
-
-
-def _avoid_common_split(text: str, i: int) -> int:
-    """均衡切若恰好落在某个常见双字词中间, 挪到最近的词边界。
-
-    例如 20 字的 "我们在右上角这里有一个电脑设备的一个指纹" 均衡切在第 12 字,
-    会把 "电脑" 劈成 电|脑 得 "脑设备的一个指纹"; 这里自动挪到:
-      "我们在右上角这里有一个 | 电脑设备的一个指纹"。"""
-    n = len(text)
-    if not (1 <= i < n) or text[i - 1:i + 1] not in _COMMON_WORDS:
-        return i
-    target = min(TARGET_LEN, min(MAX_CHARS, n - 1))
-    best_alt = None
-    best_d = 1e9
-    for j in (i - 1, i + 1, i - 2, i + 2, i - 3, i + 3):
-        if not (3 <= j <= min(MAX_CHARS, n - 1)):
-            continue
-        if _is_latin(text[j - 1]) and _is_latin(text[j]):  # 英文单词中间
-            continue
-        if text[j - 1:j + 1] in _COMMON_WORDS:  # 挪过去又劈另一个词
-            continue
-        if n - j < 4:  # 残尾
-            continue
-        d = abs(j - target)
-        if d < best_d:
-            best_d = d
-            best_alt = j
-    return best_alt if best_alt is not None else i
-
-
-def _find_cut(text: str) -> int:
-    """在句子中找最佳切点(首行尽量 ≤ TARGET_LEN, 绝不劈开英文/拉丁单词)。
-
-    两级选择:
-      一级(语义边界): 在『首行 ≤ TARGET_LEN+3』的窗口内找语义边界
-                       (代词/关联词前、语气助词后、空格), 取最接近 TARGET_LEN 的。
-                       首行因语义边界被拖得太长就放弃, 避免 18 字长行。
-      二级(均衡切):   没有合格语义边界时, 取最接近 TARGET_LEN 的均衡位置,
-                       同时避开悬空残尾。绝不落在英文单词中间。
-    """
-    n = len(text)
-    if n <= 1:
-        return n
-    limit = min(MAX_CHARS, n - 1)  # 始终给尾巴留 ≥1 字, 保证是真拆分
-    target = min(TARGET_LEN, limit)
-
-    def is_latin(c: str) -> bool:
-        return bool(c) and c.isascii() and c.isalnum()
-
-    def latin_split(i: int) -> bool:
-        return i < n and is_latin(text[i - 1]) and is_latin(text[i])
-
-    # 一级: 语义边界
-    sem_best = None
-    sem_d = 1e9
-    for i in range(3, min(limit, target + 3) + 1):
-        if latin_split(i):
-            continue
-        if n - i < 4:  # 残尾不放做语义切点
-            continue
-        if _is_semantic(text, i):
-            d = abs(i - target)
-            if d < sem_d:
-                sem_d = d
-                sem_best = i
-    if sem_best is not None:
-        return sem_best
-
-    # 二级: 均衡切 — 优先『紧贴英文/拉丁单词边界』的切点(不撕裂中英文交界),
-    #       否则取最接近 target 的均衡位置; 残尾越小越差。
-    def latin_edge(i: int) -> bool:
-        return i < n and is_latin(text[i - 1]) != is_latin(text[i])
-
-    # 二级a: 目标附近的拉丁单词边界(离 target ≤ 4)
-    edge_best = None
-    edge_key = (1e9, 1e9)
-    for i in range(3, limit + 1):
-        if latin_split(i):
-            continue
-        if abs(i - target) > 4:
-            continue
-        if not latin_edge(i):
-            continue
-        tail = n - i
-        pen = 0 if tail >= 4 else (4 - tail)
-        key = (abs(i - target), pen)
-        if key < edge_key:
-            edge_key = key
-            edge_best = i
-    if edge_best is not None:
-        return _avoid_common_split(text, edge_best)
-
-    # 二级b: 普通均衡切
-    bal_best = None
-    bal_key = (1e9, 1e9)
-    for i in range(3, limit + 1):
-        if latin_split(i):
-            continue
-        tail = n - i
-        pen = 0 if tail >= 4 else (4 - tail)
-        key = (abs(i - target), pen)
-        if key < bal_key:
-            bal_key = key
-            bal_best = i
-    if bal_best is not None:
-        return _avoid_common_split(text, bal_best)
-    # 极端兜底: 前 limit 字是同一段超长拉丁连续词, 无安全切点
-    return min(limit, max(3, n - 1))
 
 
 def _time_to_seconds(t: str) -> float:
@@ -420,61 +191,27 @@ def make_monotonic(subtitles: list[dict]) -> list[dict]:
 
 
 def post_process(srt_text: str, terms_mapping: dict = None, term_corrections: dict = None) -> list[dict]:
-    """后处理: 标点清理 + 术语替换 + 按双空格停顿断行。
-    不做字数硬拆——保持 Gemini 语义断句与单词完整,
-    时间戳按字符比例分配给按停顿拆出的各段。
+    """后处理: 简体转换 + 术语替换 + 标点清理。
+
+    信任 Gemini 每行自带的时间戳——不再对单个字幕做按字符比例的伪拆分,
+    因为语音不是均匀分布的, 伪时间戳会让文字出现的时刻与实际说话时刻脱节。
+    因此只做文本清洗, 时间轴原样保留(每条字幕 = Gemini 的一行)。
     """
     if terms_mapping is None:
         terms_mapping = {}
 
     raw_subs = parse_srt(srt_text)
     processed = []
-    idx = 1
-
     for sub in raw_subs:
-        text = sub["text"]
-        # 先转简体, 再做术语替换, 然后按标点/停顿拆分, 最后清理标点
-        text = to_simplified(text)
+        text = to_simplified(sub["text"])
         text = apply_terms(text, terms_mapping, term_corrections)
-        text = text.strip()
-
+        text = clean_punctuation(text).strip()
         if not text:
             continue
-
-        segments = split_by_pauses(text)
-        segments = [clean_punctuation(s).strip() for s in segments]
-        segments = [s for s in segments if s]
-        if not segments:
-            continue
-        if len(segments) == 1:
-            processed.append({
-                "idx": idx,
-                "start_time": sub["start_time"],
-                "end_time": sub["end_time"],
-                "text": segments[0]
-            })
-            idx += 1
-        else:
-            # 按字符比例把 [start, end] 分配给各段
-            total_chars = sum(count_chars(s) for s in segments)
-            start_sec = _time_to_seconds(sub["start_time"])
-            end_sec = _time_to_seconds(sub["end_time"])
-            duration = end_sec - start_sec
-            cursor = start_sec
-            for i, seg in enumerate(segments):
-                if i == len(segments) - 1:
-                    seg_end = end_sec  # 最后一段精确对齐原结束时间
-                else:
-                    seg_chars = count_chars(seg)
-                    seg_dur = duration * seg_chars / total_chars if total_chars else duration / len(segments)
-                    seg_end = cursor + seg_dur
-                processed.append({
-                    "idx": idx,
-                    "start_time": _seconds_to_time(cursor),
-                    "end_time": _seconds_to_time(seg_end),
-                    "text": seg
-                })
-                idx += 1
-                cursor = seg_end
-
+        processed.append({
+            "idx": len(processed) + 1,
+            "start_time": sub["start_time"],
+            "end_time": sub["end_time"],
+            "text": text
+        })
     return make_monotonic(processed)
