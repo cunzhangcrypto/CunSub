@@ -290,7 +290,7 @@ def start_generation(project_id: str):
 
     # 用本地 whisper 对语音做真实对齐, 覆盖 Gemini 的不可靠时间戳:
     # 文字仍是 Gemini 的, 时间轴对齐到真实语音。失败则保留 Gemini 时间。
-    audio_path = project.get("audio_path")
+    audio_path = dict(project).get("audio_path")
     if audio_path:
         segs = transcribe_audio(audio_path)
         if segs:
